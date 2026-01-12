@@ -1,95 +1,44 @@
 #!/usr/bin/env python3
 from cereal import car
-from panda import Panda
-from common.conversions import Conversions as CV
-from selfdrive.car import STD_CARGO_KG, get_safety_config
-from selfdrive.car.ford.values import CAR, Ecu
+from selfdrive.config import Conversions as CV
+from selfdrive.car.ford.values import CAR
+from selfdrive.car import STD_CARGO_KG, scale_rot_inertia, scale_tire_stiffness, gen_empty_fingerprint, get_safety_config
 from selfdrive.car.interfaces import CarInterfaceBase
-
-TransmissionType = car.CarParams.TransmissionType
-GearShifter = car.CarState.GearShifter
-
 
 class CarInterface(CarInterfaceBase):
   @staticmethod
-  def _get_params(ret, candidate, fingerprint, car_fw, experimental_long, docs):
+  def get_params(candidate, fingerprint=gen_empty_fingerprint(), car_fw=[]):
+    ret = CarInterfaceBase.get_std_params(candidate, fingerprint)
     ret.carName = "ford"
     ret.safetyConfigs = [get_safety_config(car.CarParams.SafetyModel.ford)]
-
-    # These cars are dashcam only for lack of test coverage.
-    # Once a user confirms each car works and a test route is
-    # added to selfdrive/car/tests/routes.py, we can remove it from this list.
-    ret.dashcamOnly = candidate in {CAR.FOCUS_MK4}
-
-    ret.radarUnavailable = True
+    ret.dashcamOnly = False
     ret.steerControlType = car.CarParams.SteerControlType.angle
-    ret.steerActuatorDelay = 0.2
-    ret.steerLimitTimer = 1.0
-
-    ret.experimentalLongitudinalAvailable = True
-    if experimental_long:
-      ret.safetyConfigs[0].safetyParam |= Panda.FLAG_FORD_LONG_CONTROL
-      ret.openpilotLongitudinalControl = True
-
-    if candidate == CAR.BRONCO_SPORT_MK1:
-      ret.wheelbase = 2.67
-      ret.steerRatio = 17.7
-      ret.mass = 1625 + STD_CARGO_KG
-
-    elif candidate == CAR.ESCAPE_MK4:
-      ret.wheelbase = 2.71
-      ret.steerRatio = 16.7
-      ret.mass = 1750 + STD_CARGO_KG
-
-    elif candidate == CAR.EXPLORER_MK6:
-      ret.wheelbase = 3.025
-      ret.steerRatio = 16.8
-      ret.mass = 2050 + STD_CARGO_KG
-
-    elif candidate == CAR.FOCUS_MK4:
-      ret.wheelbase = 2.7
-      ret.steerRatio = 15.0
-      ret.mass = 1350 + STD_CARGO_KG
-
-    elif candidate == CAR.MAVERICK_MK1:
-      ret.wheelbase = 3.076
-      ret.steerRatio = 17.0
-      ret.mass = 1650 + STD_CARGO_KG
-
-    else:
-      raise ValueError(f"Unsupported car: {candidate}")
-
-    # Auto Transmission: 0x732 ECU or Gear_Shift_by_Wire_FD1
-    found_ecus = [fw.ecu for fw in car_fw]
-    if Ecu.shiftByWire in found_ecus or 0x5A in fingerprint[0] or docs:
-      ret.transmissionType = TransmissionType.automatic
-    else:
-      ret.transmissionType = TransmissionType.manual
-      ret.minEnableSpeed = 20.0 * CV.MPH_TO_MS
-
-    # BSM: Side_Detect_L_Stat, Side_Detect_R_Stat
-    # TODO: detect bsm in car_fw?
-    ret.enableBsm = 0x3A6 in fingerprint[0] and 0x3A7 in fingerprint[0]
-
-    # LCA can steer down to zero
-    ret.minSteerSpeed = 0.
-
-    ret.autoResumeSng = ret.minEnableSpeed == -1.
+    ret.openpilotLongitudinalControl = False
+    ret.steerRateCost = 0.5
+    ret.steerActuatorDelay = 0.1
+    ret.mass = 4770. * CV.LB_TO_KG + STD_CARGO_KG
+    ret.steerRatio = 17
+    ret.wheelbase = 3.68
     ret.centerToFront = ret.wheelbase * 0.44
+    ret.rotationalInertia = scale_rot_inertia(ret.mass, ret.wheelbase)
+    ret.tireStiffnessFront, ret.tireStiffnessRear = scale_tire_stiffness(ret.mass, ret.wheelbase, ret.centerToFront)
     return ret
 
-  def _update(self, c):
+  def update(self, c, can_strings):
+    self.cp.update_strings(can_strings)
+    self.cp_cam.update_strings(can_strings)
     ret = self.CS.update(self.cp, self.cp_cam)
+    ret.canValid = self.cp.can_valid and self.cp_cam.can_valid
 
-    events = self.create_common_events(ret, extra_gears=[GearShifter.manumatic])
-    if not self.CS.vehicle_sensors_valid:
-      events.add(car.CarEvent.EventName.vehicleSensorsInvalid)
-    if self.CS.hybrid_platform:
-      events.add(car.CarEvent.EventName.startupNoControl)
-
+    # Events
+    events = self.create_common_events(ret)
     ret.events = events.to_msg()
 
-    return ret
+    self.CS.out = ret.as_reader()
+    return self.CS.out
 
-  def apply(self, c, now_nanos):
-    return self.CC.update(c, self.CS, now_nanos)
+  # to be called @ 100hz
+  def apply(self, c):
+    can_sends = self.CC.update(c, c.enabled, self.CS, self.frame, c.actuators, c.cruiseControl.cancel)
+    self.frame += 1
+    return can_sends
