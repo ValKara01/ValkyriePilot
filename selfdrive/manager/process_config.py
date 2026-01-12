@@ -1,45 +1,47 @@
-from cereal import car
-from common.params import Params
-from selfdrive.manager.process import ManagerProcess
-from common.system import is_android
+import os
 
-def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return params.get_bool("IsDriverViewEnabled")  # type: ignore
+from selfdrive.hardware import EON, TICI, PC
+from selfdrive.manager.process import PythonProcess, NativeProcess, DaemonProcess
 
-def notcar(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return CP.notCar  # type: ignore
-
-def logging(started, params, CP: car.CarParams) -> bool:
-  run = (not CP.notCar) or not params.get_bool("DisableLogging")
-  return started and run
-
-def useModelParseD():
-  #return False #if we are running externally
-  return Params().get_bool("F3")
+WEBCAM = os.getenv("USE_WEBCAM") is not None
 
 procs = [
-  ManagerProcess("controlsd", "controlsd"),
-  ManagerProcess("plannerd", "plannerd"),
-  ManagerProcess("radard", "radard"),
-  ManagerProcess("calibrationd", "calibrationd"),
-  ManagerProcess("modelparsed", "./selfdrive/modeld/modelparsed", enabled=useModelParseD()),
-  ManagerProcess("clocksd", "./system/clocksd/clocksd"),
-  ManagerProcess("proclogd", "./system/proclogd/proclogd"),
-  ManagerProcess("logmessaged", "logmessaged", offroad=True),
-  ManagerProcess("thermald_", "thermald_", offroad=True),
-  #ManagerProcess("statsd", "statsd", offroad=True),
-  ManagerProcess("keyvald", "keyvald", offroad=True),
-  ManagerProcess("flowpilot", "./gradlew", args=["desktop:run"], rename=False, offroad=True, platform=["desktop"], pipe_std=False),
-  ManagerProcess("pandad", "pandad", offroad=True),
-  #ManagerProcess("loggerd", "./selfdrive/loggerd/loggerd", enabled=True, onroad=False, callback=logging),
-  #ManagerProcess("uploader", "uploader", enabled=is_android(), offroad=True),
-  #ManagerProcess("deleter", "deleter", enabled=True, offroad=True),
-  ManagerProcess("ubloxd", "./selfdrive/locationd/ubloxd", onroad=False),
-  ManagerProcess("laikad", "laikad", enabled=False),
-  #ManagerProcess("paramsd", "paramsd", enabled=False),
-  ManagerProcess("torqued", "torqued", enabled=False),
-  #ManagerProcess("locationd", "./selfdrive/locationd/locationd", enabled=False),
+  DaemonProcess("manage_athenad", "selfdrive.athena.manage_athenad", "AthenadPid", enabled=False),
+  # due to qualcomm kernel bugs SIGKILLing camerad sometimes causes page table corruption
+  NativeProcess("camerad", "selfdrive/camerad", ["./camerad"], unkillable=True, driverview=False),
+  NativeProcess("clocksd", "selfdrive/clocksd", ["./clocksd"]),
+  NativeProcess("dmonitoringmodeld", "selfdrive/modeld", ["./dmonitoringmodeld"], enabled=False, driverview=False),
+  NativeProcess("logcatd", "selfdrive/logcatd", ["./logcatd"], enabled=False),
+  NativeProcess("loggerd", "selfdrive/loggerd", ["./loggerd"], enabled=False),
+  NativeProcess("modeld", "selfdrive/modeld", ["./modeld"]),
+  NativeProcess("navd", "selfdrive/ui/navd", ["./navd"], enabled=False, persistent=True),
+  NativeProcess("proclogd", "selfdrive/proclogd", ["./proclogd"], enabled=False),
+  NativeProcess("sensord", "selfdrive/sensord", ["./sensord"], persistent=EON, sigkill=EON),
+  NativeProcess("ubloxd", "selfdrive/locationd", ["./ubloxd"]),
+  NativeProcess("ui", "selfdrive/ui", ["./ui"], persistent=True, watchdog_max_dt=(5 if TICI else None)),
+  NativeProcess("soundd", "selfdrive/ui/soundd", ["./soundd"], persistent=True),
+  NativeProcess("locationd", "selfdrive/locationd", ["./locationd"]),
+  NativeProcess("boardd", "selfdrive/boardd", ["./boardd"], enabled=False),
+  PythonProcess("calibrationd", "selfdrive.locationd.calibrationd"),
+  PythonProcess("controlsd", "selfdrive.controls.controlsd"),
+  PythonProcess("deleter", "selfdrive.loggerd.deleter", enabled=True, persistent=True),
+  PythonProcess("dmonitoringd", "selfdrive.monitoring.dmonitoringd", enabled=False, driverview=False),
+  PythonProcess("logmessaged", "selfdrive.logmessaged", enabled=False, persistent=True),
+  PythonProcess("pandad", "selfdrive.pandad", persistent=True),
+  PythonProcess("paramsd", "selfdrive.locationd.paramsd"),
+  PythonProcess("plannerd", "selfdrive.controls.plannerd"),
+  PythonProcess("radard", "selfdrive.controls.radard"),
+  PythonProcess("thermald", "selfdrive.thermald.thermald", persistent=True),
+  PythonProcess("timezoned", "selfdrive.timezoned", enabled=False, persistent=True),
+  PythonProcess("tombstoned", "selfdrive.tombstoned", enabled=False, persistent=True),
+  PythonProcess("updated", "selfdrive.updated", persistent=True),
+  PythonProcess("uploader", "selfdrive.loggerd.uploader", enabled=False, persistent=True),
+  PythonProcess("statsd", "selfdrive.statsd", enabled=False, persistent=True),
+
+  # EON only
+  PythonProcess("rtshield", "selfdrive.rtshield", enabled=EON),
+  PythonProcess("shutdownd", "selfdrive.hardware.eon.shutdownd", enabled=EON),
+  PythonProcess("androidd", "selfdrive.hardware.eon.androidd", enabled=EON, persistent=True),
 ]
 
-platform = "android" if is_android() else "desktop" 
-managed_processes = {p.name: p for p in procs if platform in p.platform}
+managed_processes = {p.name: p for p in procs}
