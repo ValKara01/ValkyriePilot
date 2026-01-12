@@ -1,113 +1,52 @@
-from cereal import car
-from common.numpy_fast import clip
-from opendbc.can.packer import CANPacker
+from selfdrive.car.ford.fordcan import spam_cancel_button, spam_resume_button, ParkAid_Data
+from selfdrive.car.ford.values import CarControllerParams
 from selfdrive.car import apply_std_steer_angle_limits
-from selfdrive.car.ford.fordcan import create_acc_msg, create_acc_ui_msg, create_button_msg, create_lat_ctl_msg, \
-  create_lat_ctl2_msg, create_lka_msg, create_lkas_ui_msg
-from selfdrive.car.ford.values import CANBUS, CANFD_CARS, CarControllerParams
+from opendbc.can.packer import CANPacker
+from common.params import Params
 
-LongCtrlState = car.CarControl.Actuators.LongControlState
-VisualAlert = car.CarControl.HUDControl.VisualAlert
-
-
-def apply_ford_curvature_limits(apply_curvature, apply_curvature_last, current_curvature, v_ego_raw):
-  # No blending at low speed due to lack of torque wind-up and inaccurate current curvature
-  if v_ego_raw > 9:
-    apply_curvature = clip(apply_curvature, current_curvature - CarControllerParams.CURVATURE_ERROR,
-                           current_curvature + CarControllerParams.CURVATURE_ERROR)
-
-  # Curvature rate limit after driver torque limit
-  apply_curvature = apply_std_steer_angle_limits(apply_curvature, apply_curvature_last, v_ego_raw, CarControllerParams)
-
-  return clip(apply_curvature, -CarControllerParams.CURVATURE_MAX, CarControllerParams.CURVATURE_MAX)
-
-
-class CarController:
+class CarController():
   def __init__(self, dbc_name, CP, VM):
-    self.CP = CP
-    self.VM = VM
     self.packer = CANPacker(dbc_name)
-    self.frame = 0
+    self.apply_angle_last = 0
+    self.smooth_counter = 0
+    params = Params()
+    self.ping_pong_fix = params.get_bool("PingPongFix")
 
-    self.apply_curvature_last = 0
-    self.main_on_last = False
-    self.lkas_enabled_last = False
-    self.steer_alert_last = False
-
-  def update(self, CC, sm, CS, now_nanos):
+  def update(self, c, enabled, CS, frame, actuators, cruise_cancel):
     can_sends = []
 
-    actuators = CC.actuators
-    hud_control = CC.hudControl
+    apply_angle = self.apply_angle_last
+    
+    if cruise_cancel:
+      can_sends.append(spam_cancel_button(self.packer))
 
-    main_on = CS.out.cruiseState.available
-    steer_alert = hud_control.visualAlert in (VisualAlert.steerRequired, VisualAlert.ldw)
+    if CS.acc_stopped:
+      can_sends.append(spam_resume_button(self.packer))
 
-    ### acc buttons ###
-    if CC.cruiseControl.cancel:
-      can_sends.append(create_button_msg(self.packer, CS.buttons_stock_values, cancel=True))
-      can_sends.append(create_button_msg(self.packer, CS.buttons_stock_values, cancel=True, bus=CANBUS.main))
-    elif CC.cruiseControl.resume and (self.frame % CarControllerParams.BUTTONS_STEP) == 0:
-      can_sends.append(create_button_msg(self.packer, CS.buttons_stock_values, resume=True))
-      can_sends.append(create_button_msg(self.packer, CS.buttons_stock_values, resume=True, bus=CANBUS.main))
-    # if stock lane centering isn't off, send a button press to toggle it off
-    # the stock system checks for steering pressed, and eventually disengages cruise control
-    elif CS.acc_tja_status_stock_values["Tja_D_Stat"] != 0 and (self.frame % CarControllerParams.ACC_UI_STEP) == 0:
-      can_sends.append(create_button_msg(self.packer, CS.buttons_stock_values, tja_toggle=True))
+    if (frame % CarControllerParams.APA_STEP) == 0:
+      if c.active and CS.sappControlState == 2:
+        smooth_factor = 1
+        angle_delta = abs(actuators.steeringAngleDeg - self.apply_angle_last)
 
-    ### lateral control ###
-    # send steer msg at 20Hz
-    if (self.frame % CarControllerParams.STEER_STEP) == 0:
-      if CC.latActive:
-        # apply rate limits, curvature error limit, and clip to signal range
-        current_curvature = -CS.out.yawRate / max(CS.out.vEgoRaw, 0.1)
-        apply_curvature = apply_ford_curvature_limits(actuators.curvature, self.apply_curvature_last, current_curvature, CS.out.vEgoRaw)
+        if angle_delta <= CarControllerParams.SMOOTH_DELTA and abs(actuators.steeringAngleDeg) <= CarControllerParams.SMOOTH_DELTA:
+          self.smooth_counter += 1
+        else:
+          self.smooth_counter = 0
+
+        if self.smooth_counter >= (CarControllerParams.SMOOTH_SECONDS * 50) and self.ping_pong_fix:
+          smooth_factor = CarControllerParams.SMOOTH_FACTOR
+
+        apply_angle = apply_std_steer_angle_limits(actuators.steeringAngleDeg * smooth_factor, self.apply_angle_last, CS.out.vEgo, CarControllerParams)
+      
       else:
-        apply_curvature = 0.
+        apply_angle = CS.out.steeringAngleDeg
+        self.smooth_counter = 0
 
-      self.apply_curvature_last = apply_curvature
-
-      if self.CP.carFingerprint in CANFD_CARS:
-        # TODO: extended mode
-        mode = 1 if CC.latActive else 0
-        counter = self.frame // CarControllerParams.STEER_STEP
-        can_sends.append(create_lat_ctl2_msg(self.packer, mode, 0., 0., -apply_curvature, 0., counter))
-      else:
-        can_sends.append(create_lat_ctl_msg(self.packer, CC.latActive, 0., 0., -apply_curvature, 0.))
-
-    # send lka msg at 33Hz
-    if (self.frame % CarControllerParams.LKA_STEP) == 0:
-      can_sends.append(create_lka_msg(self.packer))
-
-    ### longitudinal control ###
-    # send acc msg at 50Hz
-    if self.CP.openpilotLongitudinalControl and (self.frame % CarControllerParams.ACC_CONTROL_STEP) == 0:
-      # Both gas and accel are in m/s^2, accel is used solely for braking
-      accel = clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX)
-      gas = accel
-      if not CC.longActive or gas < CarControllerParams.MIN_GAS:
-        gas = CarControllerParams.INACTIVE_GAS
-
-      stopping = CC.actuators.longControlState == LongCtrlState.stopping
-      can_sends.append(create_acc_msg(self.packer, CC.longActive, gas, accel, stopping))
-
-    ### ui ###
-    send_ui = (self.main_on_last != main_on) or (self.lkas_enabled_last != CC.latActive) or (self.steer_alert_last != steer_alert)
-    # send lkas ui msg at 1Hz or if ui state changes
-    if (self.frame % CarControllerParams.LKAS_UI_STEP) == 0 or send_ui:
-      can_sends.append(create_lkas_ui_msg(self.packer, main_on, CC.latActive, steer_alert, hud_control, CS.lkas_status_stock_values))
-    # send acc ui msg at 5Hz or if ui state changes
-    if (self.frame % CarControllerParams.ACC_UI_STEP) == 0 or send_ui:
-      can_sends.append(create_acc_ui_msg(self.packer, self.CP, main_on, CC.latActive,
-                                         CS.out.cruiseState.standstill, hud_control,
-                                         CS.acc_tja_status_stock_values))
-
-    self.main_on_last = main_on
-    self.lkas_enabled_last = CC.latActive
-    self.steer_alert_last = steer_alert
-
+      can_sends.append(ParkAid_Data(self.packer, c.active and not CS.out.standstill, apply_angle, CS.sappControlState))
+    
+    self.apply_angle_last = apply_angle
+    
     new_actuators = actuators.copy()
-    new_actuators.curvature = self.apply_curvature_last
+    new_actuators.steeringAngleDeg = apply_angle
 
-    self.frame += 1
     return new_actuators, can_sends
