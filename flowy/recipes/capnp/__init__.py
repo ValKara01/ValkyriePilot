@@ -39,7 +39,7 @@ class CapnpRecipe(Recipe):
             with current_directory(join(curdir, '.libs')):
                 for lib in sh.glob("lib*-1.0.1.so"):
                     shprint(sh.ln, '-sf', lib, lib.replace('-1.0.1', ''))
-                    shprint(sh.cp, '-a', lib, lib.replace('-1.0.1', ''), self.ctx.get_libs_dir(arch.arch))
+                    shprint(sh.cp, '-d', lib, lib.replace('-1.0.1', ''), self.ctx.get_libs_dir(arch.arch))
 
 
 recipe = CapnpRecipe()
