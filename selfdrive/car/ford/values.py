@@ -11,6 +11,7 @@ Ecu = car.CarParams.Ecu
 
 
 class CarControllerParams:
+  APA_STEP = 2          # 50hz
   STEER_STEP = 5        # LateralMotionControl, 20Hz
   LKA_STEP = 3          # Lane_Assist_Data1, 33Hz
   ACC_CONTROL_STEP = 2  # ACCDATA, 50Hz
@@ -34,6 +35,11 @@ class CarControllerParams:
   MIN_GAS = -0.5
   INACTIVE_GAS = -5.0
 
+  #Ping Pong Fix
+  SMOOTH_DELTA = 3
+  SMOOTH_FACTOR = 0.6
+  SMOOTH_SECONDS = 3
+
   def __init__(self, CP):
     pass
 
@@ -50,6 +56,7 @@ class CAR:
   EXPLORER_MK6 = "FORD EXPLORER 6TH GEN"
   FOCUS_MK4 = "FORD FOCUS 4TH GEN"
   MAVERICK_MK1 = "FORD MAVERICK 1ST GEN"
+  F150_MK13 = "FORD F-150 13TH GEN"
 
 
 CANFD_CARS: Set[str] = set()
@@ -60,7 +67,7 @@ class RADAR:
   DELPHI_MRR = 'FORD_CADS'
 
 
-DBC: Dict[str, Dict[str, str]] = defaultdict(lambda: dbc_dict("ford_lincoln_base_pt", RADAR.DELPHI_MRR))
+DBC: Dict[str, Dict[str, str]] = defaultdict(lambda: dbc_dict("ford_f150", RADAR.DELPHI_MRR))
 
 
 @dataclass
@@ -74,6 +81,7 @@ class FordCarInfo(CarInfo):
 
 
 CAR_INFO: Dict[str, Union[CarInfo, List[CarInfo]]] = {
+  CAR.F150_MK13: FordCarInfo("Ford F-150 2015-2020"),
   CAR.BRONCO_SPORT_MK1: FordCarInfo("Ford Bronco Sport 2021-22"),
   CAR.ESCAPE_MK4: [
     FordCarInfo("Ford Escape 2020-22"),
@@ -98,12 +106,20 @@ FW_QUERY_CONFIG = FwQueryConfig(
       [StdQueries.TESTER_PRESENT_REQUEST, StdQueries.MANUFACTURER_SOFTWARE_VERSION_REQUEST],
       [StdQueries.TESTER_PRESENT_RESPONSE, StdQueries.MANUFACTURER_SOFTWARE_VERSION_RESPONSE],
       bus=0,
-      whitelist_ecus=[Ecu.eps, Ecu.abs, Ecu.fwdRadar, Ecu.fwdCamera, Ecu.shiftByWire],
+      whitelist_ecus=[Ecu.eps, Ecu.abs, Ecu.fwdRadar, Ecu.fwdCamera, Ecu.shiftByWire, Ecu.transmission],
     ),
   ],
 )
 
 FW_VERSIONS = {
+  CAR.F150_MK13: {
+    (Ecu.engine, 0x7E0, None): [
+      b'KL3A-14C204-ND\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+    ],
+    (Ecu.transmission, 0x7E1, None): [
+      b'KL3A-14C337-DD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+    ],
+  },
   CAR.BRONCO_SPORT_MK1: {
     (Ecu.eps, 0x730, None): [
       b'LX6C-14D003-AH\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
