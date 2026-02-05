@@ -31,7 +31,12 @@ class CarInterface(CarInterfaceBase):
       ret.safetyConfigs[0].safetyParam |= Panda.FLAG_FORD_LONG_CONTROL
       ret.openpilotLongitudinalControl = True
 
-    if candidate == CAR.BRONCO_SPORT_MK1:
+    if candidate == CAR.F150_MK13:
+      ret.wheelbase = 3.68
+      ret.steerRatio = 17
+      ret.mass = 2160 + STD_CARGO_KG
+
+    elif candidate == CAR.BRONCO_SPORT_MK1:
       ret.wheelbase = 2.67
       ret.steerRatio = 17.7
       ret.mass = 1625 + STD_CARGO_KG
